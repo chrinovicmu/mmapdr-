@@ -17,9 +17,9 @@
 
 #define BUF_SIZE (64 * 1024UL) //64 kib 
 
-struct mmap_vma_priv
+struct mmapdr_vma_priv
 {
-    struct mmap_device *mdev;
+    struct mmapdr_device *mdev;
 
     /*track num of VMAs sharing this private data */ 
     atomic_t refcount; 
@@ -28,7 +28,7 @@ struct mmap_vma_priv
     unsigned long mapped_bytes; 
 }; 
 
-struct mmap_device
+struct mmapdr_device
 {
     /*device */ 
     struct cdev cdev; 
