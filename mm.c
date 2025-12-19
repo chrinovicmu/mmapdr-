@@ -1,5 +1,3 @@
-
-#include <cerrno>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
@@ -38,6 +36,7 @@ static void mmapdr_vma_close(struct vm_area_struct *vma)
 static vm_fault_t mmapdr_map_fault(struct vm_fault *vmf)
 {
     struct vm_area_struct *vma = vmf->vma; 
+    struct page *page; 
     struct mmapdr_vma_priv *priv = vma->vm_private_data; 
     unsigned long offset = vmf->pgoff << PAGE_SHIFT; 
     unsigned int idx;
@@ -88,7 +87,7 @@ static int mmapdr_mmap(struct file *filep, struct vm_area_struct *vma)
 
     vma->vm_private_data = priv; 
     vma->vm_ops = mmapdr_vm_ops; 
-    vm->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+    vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 
     if(vma->vm_flags & VM_WRITE)
         vma->vm_flags |= VM_MIXEDMAP; 
@@ -140,7 +139,7 @@ static int __init mmapdr_init(void)
     atomic64_set(&g_mdev->fault_count, 0); 
     atomic64_set(&g_mdev->bytes_mapped, 0); 
 
-    g_mdev->virt_addr = dma_alloc_coherant(NULL, BUF_SIZE, 
+    g_mdev->virt_addr = dma_alloc_coherent(NULL, BUF_SIZE, 
                                            &g_mdev->dma_handle, 
                                            GFP_KERNEL | __GFP_ZERO); 
     if(!g_mdev->virt_addr)
@@ -150,7 +149,7 @@ static int __init mmapdr_init(void)
     }
 
     g_mdev->nr_pages = BUF_SIZE >> PAGE_SHIFT; 
-    g_mdev->pages = kvmalloc_array(g_mdev->nr_pages, sizeeof(struct page*), GFP_KERNEL); 
+    g_mdev->pages = kvmalloc_array(g_mdev->nr_pages, sizeof(struct page*), GFP_KERNEL); 
     if(!g_mdev->pages)
     {
         ret = -ENOMEM; 
@@ -159,4 +158,76 @@ static int __init mmapdr_init(void)
 
     for(unsigned int i = 0; i < g_mdev->nr_pages; ++i)
         g_mdev->pages[i] = pfn_to_page((g_mdev->dma_handle >> PAGE_SHIFT) + i);
+
+    ret = alloc_chrdev_region(&g_mdev->devt, 0, 1, DEVICE_NAME); 
+    if(ret < 0)
+        goto _err_free_pages; 
+
+    g_mdev->class = class_create(DEVICE_NAME); 
+    if(IS_ERR(g_mdev->class)) 
+    {
+        ret = PTR_ERR(g_mdev->class); 
+        goto _err_unregister; 
+    }
+
+    cdev_init(&g_mdev->cdev, &mmapdr_fops); 
+    ret = cdev_add(&g_mdev->cdev, g_mdev->devt, 1); 
+    if(ret)
+        goto _err_class; 
+
+    g_mdev->dev = device_create(g_mdev->class, NULL, g_mdev->devt, NULL, DEVICE_NAME); 
+    if(IS_ERR(g_mdev->class))
+    {
+        ret = PTR_ERR(g_mdev->dev); 
+        goto _err_cdev; 
+    }
+
+    g_mdev->debugfs_dir = debugfs_create_dir(DEVICE_NAME, NULL); 
+    debugfs_create_file("stats", 0444, g_mdev->debugfs_dir, NULL, &stats_fops); 
+
+    pr_info("%s: loaded - 63 Kib DMA buffer at 0x%llx\n", 
+            DEVICE_NAME, (unsigned long long)g_mdev->dma_handle); 
+
+    return 0; 
+
+_err_cdev:
+    cdev_del(&g_mdev->cdev); 
+_err_class:
+    class_destroy(g_mdev->class); 
+_err_unregister:
+    unregister_chrdev_region(g_mdev->devt, 1); 
+_err_free_pages:
+    kvfree(g_mdev->pages); 
+_err_free_dma:
+    dma_free_coherent(NULL, BUF_SIZE, g_mdev->virt_addr, g_mdev->dma_handle); 
+_err_free_dev:
+    kfree(g_mdev); 
+    g_mdev = NULL; 
+    return ret; 
 }
+
+static void __exit mmapdr_exit(void)
+{
+    if (!g_mdev)
+        return;
+
+    debugfs_remove_recursive(g_mdev->debugfs_dir);
+    cdev_del(&g_mdev->cdev);
+    device_destroy(g_mdev->class, g_mdev->devt);
+    class_destroy(g_mdev->class);
+    unregister_chrdev_region(g_mdev->devt, 1);
+
+    kvfree(g_mdev->pages);
+    dma_free_coherent(NULL, BUF_SIZE, g_mdev->virt_addr, g_mdev->dma_handle);
+    kfree(g_mdev);
+
+    pr_info("%s: unloaded\n", DEVICE_NAME);
+
+}
+
+module_init(mmapdr_init); 
+module_exit(mmapdr_exit); 
+
+MODULE_LICENSE("GPL"); 
+MODULE_AUTHOR("Chrinovic M"); 
+MODULE_DESCRIPTION("Clean modern mmap driver with lazy faulting"); 
